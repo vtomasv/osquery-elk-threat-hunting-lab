@@ -1,0 +1,294 @@
+###############################################################################
+# OSQUERY + ELK THREAT HUNTING LAB
+# Taller Completo de Cacería de Amenazas con Monitoreo en Tiempo Real
+# Universidad Mayor - MAR404 - Cacería de Amenazas (Threat Hunter)
+#
+# Arquitectura:
+#   - 1x Elasticsearch (almacenamiento y búsqueda)
+#   - 1x Logstash (ingesta y procesamiento de logs)
+#   - 1x Kibana (visualización y dashboards)
+#   - 5x Endpoints Ubuntu con Osquery + Filebeat + noVNC
+#   - 1x Attacker (Kali-like con herramientas ofensivas)
+#
+# Red interna: 10.10.10.0/24
+###############################################################################
+
+version: '3.8'
+
+networks:
+  hunting-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.10.0/24
+
+volumes:
+  elasticsearch-data:
+    driver: local
+  kibana-data:
+    driver: local
+
+services:
+  #############################################################################
+  # ELK STACK
+  #############################################################################
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: elk-elasticsearch
+    hostname: elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=threat-hunting-cluster
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.10
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.12.0
+    container_name: elk-logstash
+    hostname: logstash
+    volumes:
+      - ./elk/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./elk/logstash/pipeline/:/usr/share/logstash/pipeline/:ro
+    ports:
+      - "5044:5044"
+      - "5045:5045"
+      - "9600:9600"
+    environment:
+      - "LS_JAVA_OPTS=-Xms512m -Xmx512m"
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.11
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: elk-kibana
+    hostname: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+      - server.host=0.0.0.0
+    volumes:
+      - kibana-data:/usr/share/kibana/data
+      - ./elk/kibana/config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    ports:
+      - "5601:5601"
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.12
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  #############################################################################
+  # ENDPOINTS CON OSQUERY + FILEBEAT + noVNC
+  #############################################################################
+  endpoint1:
+    build:
+      context: ./endpoints/endpoint1
+      dockerfile: Dockerfile
+    container_name: endpoint1-workstation
+    hostname: WS-FINANZAS-01
+    environment:
+      - ENDPOINT_NAME=WS-FINANZAS-01
+      - ENDPOINT_ROLE=Workstation Finanzas
+      - ENDPOINT_USER=maria.gonzalez
+      - VNC_PASSWORD=hunter2024
+      - DISPLAY=:1
+    ports:
+      - "6901:6901"
+    volumes:
+      - ./shared/osquery/osquery.conf:/etc/osquery/osquery.conf:ro
+      - ./shared/osquery/osquery.flags:/etc/osquery/osquery.flags:ro
+      - ./shared/filebeat/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./attack-simulation/payloads:/opt/payloads:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.101
+    depends_on:
+      - logstash
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+    privileged: true
+
+  endpoint2:
+    build:
+      context: ./endpoints/endpoint2
+      dockerfile: Dockerfile
+    container_name: endpoint2-workstation
+    hostname: WS-RRHH-01
+    environment:
+      - ENDPOINT_NAME=WS-RRHH-01
+      - ENDPOINT_ROLE=Workstation RRHH
+      - ENDPOINT_USER=carlos.mendez
+      - VNC_PASSWORD=hunter2024
+      - DISPLAY=:1
+    ports:
+      - "6902:6901"
+    volumes:
+      - ./shared/osquery/osquery.conf:/etc/osquery/osquery.conf:ro
+      - ./shared/osquery/osquery.flags:/etc/osquery/osquery.flags:ro
+      - ./shared/filebeat/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./attack-simulation/payloads:/opt/payloads:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.102
+    depends_on:
+      - logstash
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+    privileged: true
+
+  endpoint3:
+    build:
+      context: ./endpoints/endpoint3
+      dockerfile: Dockerfile
+    container_name: endpoint3-server
+    hostname: SRV-FILESERVER-01
+    environment:
+      - ENDPOINT_NAME=SRV-FILESERVER-01
+      - ENDPOINT_ROLE=File Server
+      - ENDPOINT_USER=admin.server
+      - VNC_PASSWORD=hunter2024
+      - DISPLAY=:1
+    ports:
+      - "6903:6901"
+    volumes:
+      - ./shared/osquery/osquery.conf:/etc/osquery/osquery.conf:ro
+      - ./shared/osquery/osquery.flags:/etc/osquery/osquery.flags:ro
+      - ./shared/filebeat/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./attack-simulation/payloads:/opt/payloads:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.103
+    depends_on:
+      - logstash
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+    privileged: true
+
+  endpoint4:
+    build:
+      context: ./endpoints/endpoint4
+      dockerfile: Dockerfile
+    container_name: endpoint4-workstation
+    hostname: WS-DESARROLLO-01
+    environment:
+      - ENDPOINT_NAME=WS-DESARROLLO-01
+      - ENDPOINT_ROLE=Workstation Desarrollo
+      - ENDPOINT_USER=pedro.silva
+      - VNC_PASSWORD=hunter2024
+      - DISPLAY=:1
+    ports:
+      - "6904:6901"
+    volumes:
+      - ./shared/osquery/osquery.conf:/etc/osquery/osquery.conf:ro
+      - ./shared/osquery/osquery.flags:/etc/osquery/osquery.flags:ro
+      - ./shared/filebeat/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./attack-simulation/payloads:/opt/payloads:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.104
+    depends_on:
+      - logstash
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+    privileged: true
+
+  endpoint5:
+    build:
+      context: ./endpoints/endpoint5
+      dockerfile: Dockerfile
+    container_name: endpoint5-dc
+    hostname: DC-CORP-01
+    environment:
+      - ENDPOINT_NAME=DC-CORP-01
+      - ENDPOINT_ROLE=Domain Controller (Simulado)
+      - ENDPOINT_USER=admin.domain
+      - VNC_PASSWORD=hunter2024
+      - DISPLAY=:1
+    ports:
+      - "6905:6901"
+    volumes:
+      - ./shared/osquery/osquery.conf:/etc/osquery/osquery.conf:ro
+      - ./shared/osquery/osquery.flags:/etc/osquery/osquery.flags:ro
+      - ./shared/filebeat/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./attack-simulation/payloads:/opt/payloads:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.105
+    depends_on:
+      - logstash
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+    privileged: true
+
+  #############################################################################
+  # ATTACKER MACHINE
+  #############################################################################
+  attacker:
+    build:
+      context: ./attack-simulation
+      dockerfile: Dockerfile
+    container_name: attacker-machine
+    hostname: ATTACKER
+    environment:
+      - VNC_PASSWORD=attack2024
+      - DISPLAY=:1
+    ports:
+      - "6900:6901"
+    volumes:
+      - ./attack-simulation/scripts:/opt/attack-scripts
+      - ./attack-simulation/payloads:/opt/payloads
+      - ./attack-simulation/lateral-movement:/opt/lateral-movement
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.200
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    privileged: true
+
+  #############################################################################
+  # WEB SERVER MALICIOSO (simula sitio de descarga)
+  #############################################################################
+  malicious-web:
+    image: nginx:alpine
+    container_name: malicious-webserver
+    hostname: evil-downloads.corp
+    volumes:
+      - ./attack-simulation/payloads:/usr/share/nginx/html:ro
+      - ./attack-simulation/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      hunting-lab:
+        ipv4_address: 10.10.10.66
+    ports:
+      - "8888:80"

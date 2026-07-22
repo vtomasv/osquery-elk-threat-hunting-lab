@@ -1,0 +1,103 @@
+###############################################################################
+# FILEBEAT CONFIGURATION - THREAT HUNTING LAB
+# Recolecta logs de Osquery, Syslog y eventos de auditoría
+###############################################################################
+
+filebeat.inputs:
+
+  # Osquery Result Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/osquery/osqueryd.results.log
+    fields:
+      log_type: osquery_result
+    fields_under_root: false
+    json.keys_under_root: false
+    json.add_error_key: true
+    json.message_key: message
+
+  # Osquery Snapshot Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/osquery/osqueryd.snapshots.log
+    fields:
+      log_type: osquery_snapshot
+    fields_under_root: false
+
+  # System Syslog
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/syslog
+      - /var/log/messages
+    fields:
+      log_type: syslog
+    fields_under_root: false
+
+  # Authentication Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/auth.log
+      - /var/log/secure
+    fields:
+      log_type: auth
+    fields_under_root: false
+
+  # Process Audit Logs (custom)
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/process_audit.log
+    fields:
+      log_type: process_audit
+    fields_under_root: false
+    json.keys_under_root: false
+
+  # Network Audit Logs (custom)
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/network_audit.log
+    fields:
+      log_type: network_audit
+    fields_under_root: false
+    json.keys_under_root: false
+
+  # Attack Simulation Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/attack_simulation.log
+    fields:
+      log_type: attack_simulation
+    fields_under_root: false
+    json.keys_under_root: false
+
+# Processors
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_fields:
+      target: ''
+      fields:
+        endpoint.hostname: "${HOSTNAME}"
+        endpoint.name: "${ENDPOINT_NAME:unknown}"
+        endpoint.role: "${ENDPOINT_ROLE:unknown}"
+
+# Output to Logstash
+output.logstash:
+  hosts: ["logstash:5044"]
+  bulk_max_size: 1024
+  timeout: 30s
+
+# Logging
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 3
+  permissions: 0644

@@ -1,0 +1,19 @@
+# Docker volumes
+elasticsearch-data/
+kibana-data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs generados
+*.log
+
+# Temp files
+*.tmp
+*.swp
+*~
