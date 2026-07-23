@@ -1,7 +1,7 @@
 ###############################################################################
 # ENDPOINT 4 - WS-DESARROLLO-01
 # Workstation del equipo de Desarrollo
-# Usuario: pedro.silva - Tiene acceso a repositorios y servidores
+# Compatible con: linux/amd64 y linux/arm64 (Apple Silicon)
 ###############################################################################
 FROM ubuntu:22.04
 
@@ -22,23 +22,33 @@ RUN apt-get update && apt-get install -y \
     cron rsyslog supervisor \
     netcat-openbsd socat \
     gcc g++ make \
-    docker.io \
-    inotify-tools \
+    inotify-tools gnupg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC && \
     git clone --depth 1 https://github.com/novnc/websockify.git /opt/noVNC/utils/websockify && \
     ln -s /opt/noVNC/vnc.html /opt/noVNC/index.html
 
-RUN curl -fsSL https://pkg.osquery.io/deb/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/osquery-archive-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/osquery-archive-keyring.gpg] https://pkg.osquery.io/deb deb main" > /etc/apt/sources.list.d/osquery.list && \
-    apt-get update && apt-get install -y osquery && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Osquery - Multi-architecture
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then \
+        curl -fsSL https://pkg.osquery.io/deb/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/osquery-archive-keyring.gpg && \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/osquery-archive-keyring.gpg] https://pkg.osquery.io/deb deb main" > /etc/apt/sources.list.d/osquery.list && \
+        apt-get update && apt-get install -y osquery && \
+        apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    else \
+        curl -fsSL -o /tmp/osquery.deb "https://github.com/osquery/osquery/releases/download/5.18.1/osquery_5.18.1-1.linux_arm64.deb" && \
+        dpkg -i /tmp/osquery.deb || (apt-get update && apt-get install -f -y) && \
+        rm -f /tmp/osquery.deb && apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi
 
-RUN curl -fsSL https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor -o /usr/share/keyrings/elastic-archive-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/elastic-archive-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main" > /etc/apt/sources.list.d/elastic-8.x.list && \
-    apt-get update && apt-get install -y filebeat && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Filebeat - Multi-architecture
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then \
+        curl -fsSL -o /tmp/filebeat.deb "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-8.12.0-amd64.deb"; \
+    else \
+        curl -fsSL -o /tmp/filebeat.deb "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-8.12.0-arm64.deb"; \
+    fi && dpkg -i /tmp/filebeat.deb && rm -f /tmp/filebeat.deb
 
 RUN mkdir -p /var/run/sshd && \
     echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \

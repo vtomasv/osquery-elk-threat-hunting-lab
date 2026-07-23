@@ -1,6 +1,7 @@
 ###############################################################################
 # ATTACKER MACHINE - Simula un adversario APT
 # Incluye herramientas ofensivas para demostración educativa
+# Compatible con: linux/amd64 y linux/arm64 (Apple Silicon)
 ###############################################################################
 FROM ubuntu:22.04
 
@@ -13,29 +14,22 @@ RUN apt-get update && apt-get install -y \
     nmap tcpdump \
     openssh-server openssh-client sshpass \
     python3 python3-pip python3-venv \
-    # Desktop para noVNC
     xfce4 xfce4-terminal xfce4-goodies dbus-x11 \
     tigervnc-standalone-server tigervnc-common \
     firefox \
-    # Herramientas ofensivas
     netcat-openbsd socat \
     hydra \
-    john \
-    hashcat \
     nikto \
     dirb \
-    sqlmap \
-    # Utilidades
     zip unzip jq htop \
     gcc g++ make \
     cron rsyslog supervisor \
     figlet toilet \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Python offensive tools
-RUN pip3 install --no-cache-dir \
+# Python offensive tools (compatible con ARM64)
+RUN pip3 install --no-cache-dir --break-system-packages \
     impacket \
-    pwntools \
     paramiko \
     requests \
     colorama \
