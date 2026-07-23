@@ -92,7 +92,7 @@ elk_event() {
     local extra="$8"
     local NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
     local TODAY=$(date +%Y.%m.%d)
-    local ES_URL="http://elasticsearch:9200"
+    local ES_URL="http://10.10.10.10:9200"
     
     local DOC='{"@timestamp":"'"${NOW}"'","event_type":"'"${event_type}"'","technique":"'"${technique}"'","tactic":"'"${tactic}"'","endpoint":"'"${endpoint}"'","endpoint_ip":"'"${endpoint_ip}"'","risk_level":"'"${risk_level}"'","description":"'"${description}"'"}'
     

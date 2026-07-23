@@ -7,7 +7,7 @@
 # Uso: send_to_elk.sh <event_type> <technique> <tactic> <endpoint> <endpoint_ip> <risk_level> <description> [extra_json]
 ###############################################################################
 
-ES_URL="http://elasticsearch:9200"
+ES_URL="http://10.10.10.10:9200"
 TODAY=$(date +%Y.%m.%d)
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 

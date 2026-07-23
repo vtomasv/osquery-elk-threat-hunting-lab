@@ -259,6 +259,8 @@ services:
       dockerfile: Dockerfile
     container_name: attacker-machine
     hostname: ATTACKER
+    depends_on:
+      - elasticsearch
     environment:
       - VNC_PASSWORD=attack2024
       - DISPLAY=:1
