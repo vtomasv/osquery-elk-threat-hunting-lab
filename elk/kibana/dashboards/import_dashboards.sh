@@ -622,6 +622,11 @@ objects.append({
     "managed": False
 })
 
+# Kibana 8.12 requires 'state' in Lens objects to be a JSON STRING, not an object
+for obj in objects:
+    if obj.get("type") == "lens" and "state" in obj.get("attributes", {}):
+        obj["attributes"]["state"] = json.dumps(obj["attributes"]["state"])
+
 # Write NDJSON
 with open("/tmp/full_dashboard.ndjson", "w") as f:
     for obj in objects:
