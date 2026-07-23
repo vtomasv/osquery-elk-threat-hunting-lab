@@ -115,7 +115,31 @@ echo "[+] Iniciando noVNC en puerto 6901..."
     6901 localhost:5901 &
 
 # ============================================================================
-# 8. Configurar desktop
+# 8. Configurar browser por defecto (midori)
+# ============================================================================
+echo "[+] Configurando browser por defecto..."
+export DISPLAY=:1
+mkdir -p /root/.local/share/applications
+cat > /root/.local/share/applications/midori.desktop << 'BROWSERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Midori Web Browser
+Exec=midori %u
+Icon=web-browser
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+Terminal=false
+Categories=Network;WebBrowser;
+BROWSERDESKTOP
+
+xdg-mime default midori.desktop x-scheme-handler/http 2>/dev/null
+xdg-mime default midori.desktop x-scheme-handler/https 2>/dev/null
+xdg-mime default midori.desktop text/html 2>/dev/null
+# También configurar en XFCE settings
+mkdir -p /root/.config/xfce4
+echo 'WebBrowser=midori' > /root/.config/xfce4/helpers.rc
+
+# ============================================================================
+# 9. Configurar desktop
 # ============================================================================
 echo "[+] Configurando escritorio..."
 mkdir -p /root/Desktop
