@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
     auditd \
     xfce4 xfce4-terminal xfce4-goodies dbus-x11 \
     tigervnc-standalone-server tigervnc-common \
-    midori xdg-utils \
+    xdg-utils \
     zip unzip jq htop strace ltrace lsof file binutils \
     cron rsyslog supervisor \
     netcat-openbsd socat \

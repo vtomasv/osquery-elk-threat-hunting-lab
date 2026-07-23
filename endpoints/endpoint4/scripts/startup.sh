@@ -115,28 +115,40 @@ echo "[+] Iniciando noVNC en puerto 6901..."
     6901 localhost:5901 &
 
 # ============================================================================
-# 8. Configurar browser por defecto (midori)
+# 8. Configurar browser por defecto
 # ============================================================================
 echo "[+] Configurando browser por defecto..."
 export DISPLAY=:1
+
+# Crear un script wrapper que abre URLs con wget + xfce4-terminal
+mkdir -p /usr/local/bin
+cat > /usr/local/bin/web-browser << 'WEBBROWSER'
+#!/bin/bash
+URL="${1:-about:blank}"
+xfce4-terminal --title="Web Browser: $URL" -e "bash -c 'echo \"Navegando a: $URL\"; echo; wget -q --spider \"$URL\" && echo \"[OK] Sitio accesible\" || echo \"[!] Sitio no accesible\"; echo; echo \"Presiona Enter para cerrar\"; read'"
+WEBBROWSER
+chmod +x /usr/local/bin/web-browser
+
+# Registrar como aplicacion
 mkdir -p /root/.local/share/applications
-cat > /root/.local/share/applications/midori.desktop << 'BROWSERDESKTOP'
+cat > /root/.local/share/applications/web-browser.desktop << 'BROWSERDESKTOP'
 [Desktop Entry]
 Type=Application
-Name=Midori Web Browser
-Exec=midori %u
+Name=Web Browser
+Exec=/usr/local/bin/web-browser %u
 Icon=web-browser
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 Terminal=false
 Categories=Network;WebBrowser;
 BROWSERDESKTOP
 
-xdg-mime default midori.desktop x-scheme-handler/http 2>/dev/null
-xdg-mime default midori.desktop x-scheme-handler/https 2>/dev/null
-xdg-mime default midori.desktop text/html 2>/dev/null
-# También configurar en XFCE settings
+xdg-mime default web-browser.desktop x-scheme-handler/http 2>/dev/null
+xdg-mime default web-browser.desktop x-scheme-handler/https 2>/dev/null
+xdg-mime default web-browser.desktop text/html 2>/dev/null
+
+# Configurar en XFCE settings
 mkdir -p /root/.config/xfce4
-echo 'WebBrowser=midori' > /root/.config/xfce4/helpers.rc
+echo 'WebBrowser=/usr/local/bin/web-browser' > /root/.config/xfce4/helpers.rc
 
 # ============================================================================
 # 9. Configurar desktop
