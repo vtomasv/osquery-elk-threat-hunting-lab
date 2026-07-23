@@ -1,7 +1,8 @@
 #!/bin/bash
 ###############################################################################
-# IMPORT DASHBOARDS - Crea dashboard con visualizaciones embebidas (by-value)
-# Usa paneles inline en el dashboard para evitar problemas de migración Lens
+# IMPORT DASHBOARDS - Crea visualizaciones y dashboard usando tipos estables
+# Usa visualization (legacy aggregation-based) en vez de Lens para evitar
+# problemas de migración con la API _import de Kibana 8.12
 #
 # Uso: ./import_dashboards.sh [kibana_url]
 ###############################################################################
@@ -21,255 +22,212 @@ for i in $(seq 1 30); do
     sleep 3
 done
 
-# ============================================================================
-# Crear dashboard con paneles embebidos (by-value) usando la API directa
-# Esto evita los problemas de migración de Lens saved objects
-# ============================================================================
-echo "[*] Creando dashboard con visualizaciones embebidas..."
-
-# Primero obtener el ID del data view threat-hunting-*
+# Obtener el ID del data view
 DV_ID=$(curl -s "${KIBANA_URL}/api/data_views" -H "kbn-xsrf: true" 2>/dev/null | \
     python3 -c "
 import json,sys
 try:
     data = json.load(sys.stdin)
     for dv in data.get('data_view', []):
-        if 'threat-hunting' in dv.get('title','') or 'threat-hunting' in dv.get('name',''):
+        if 'threat-hunting' in dv.get('title',''):
             print(dv['id']); break
-    else:
-        print('')
+    else: print('')
 except: print('')
 " 2>/dev/null)
 
 if [ -z "$DV_ID" ]; then
-    echo "  [!] No se encontro data view threat-hunting-*, creando uno..."
-    DV_ID=$(curl -s -X POST "${KIBANA_URL}/api/data_views/data_view" \
-        -H "kbn-xsrf: true" \
-        -H "Content-Type: application/json" \
-        -d '{"data_view":{"title":"threat-hunting-*","name":"Threat Hunting Events","timeFieldName":"@timestamp"}}' 2>/dev/null | \
-        python3 -c "import json,sys; print(json.load(sys.stdin).get('data_view',{}).get('id',''))" 2>/dev/null)
+    DV_ID="threat-hunting"
 fi
 echo "  Data View ID: ${DV_ID}"
 
-# Generar el dashboard con Python
-python3 - "$KIBANA_URL" "$DV_ID" << 'PYTHON_SCRIPT'
-import json
-import sys
-import urllib.request
+# ============================================================================
+# Crear visualizaciones usando el tipo 'visualization' (legacy, estable)
+# ============================================================================
+echo "[*] Creando visualizaciones..."
 
-KIBANA_URL = sys.argv[1]
-DV_ID = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "threat-hunting"
-
-def make_lens_metric(title, field, op, filter_query="", color="#6092C0"):
-    """Create an inline Lens metric panel config"""
-    col = {
-        "dataType": "number",
-        "isBucketed": False,
-        "label": title,
-        "operationType": op,
-        "scale": "ratio",
-        "sourceField": field
-    }
-    if filter_query:
-        col["filter"] = {"language": "kuery", "query": filter_query}
+# Función helper para crear una visualización
+create_vis() {
+    local id="$1"
+    local body="$2"
     
-    return {
-        "attributes": {
-            "title": title,
-            "visualizationType": "lnsLegacyMetric",
-            "state": json.dumps({
-                "datasourceStates": {"formBased": {"layers": {"l1": {"columnOrder": ["c1"], "columns": {"c1": col}, "incompleteColumns": {}}}}},
-                "filters": [],
-                "query": {"language": "kuery", "query": ""},
-                "visualization": {"layerId": "l1", "layerType": "data", "accessor": "c1"}
-            }),
-            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
-        }
-    }
-
-def make_lens_bar_timeline(title):
-    """Create an inline Lens XY bar chart over time"""
-    return {
-        "attributes": {
-            "title": title,
-            "visualizationType": "lnsXY",
-            "state": json.dumps({
-                "datasourceStates": {"formBased": {"layers": {"l1": {
-                    "columnOrder": ["x", "y"],
-                    "columns": {
-                        "x": {"dataType": "date", "isBucketed": True, "label": "@timestamp", "operationType": "date_histogram", "params": {"interval": "auto", "includeEmptyRows": True}, "scale": "interval", "sourceField": "@timestamp"},
-                        "y": {"dataType": "number", "isBucketed": False, "label": "Events", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
-                    },
-                    "incompleteColumns": {}
-                }}}},
-                "filters": [],
-                "query": {"language": "kuery", "query": ""},
-                "visualization": {"preferredSeriesType": "bar_stacked", "layers": [{"layerId": "l1", "layerType": "data", "seriesType": "bar_stacked", "accessors": ["y"], "xAccessor": "x"}], "legend": {"isVisible": True, "position": "right"}, "valueLabels": "hide"}
-            }),
-            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
-        }
-    }
-
-def make_lens_pie(title, field, shape="donut"):
-    """Create an inline Lens pie/donut chart"""
-    return {
-        "attributes": {
-            "title": title,
-            "visualizationType": "lnsPie",
-            "state": json.dumps({
-                "datasourceStates": {"formBased": {"layers": {"l1": {
-                    "columnOrder": ["b", "m"],
-                    "columns": {
-                        "b": {"dataType": "string", "isBucketed": True, "label": field, "operationType": "terms", "params": {"orderBy": {"columnId": "m", "type": "column"}, "orderDirection": "desc", "size": 10}, "scale": "ordinal", "sourceField": field},
-                        "m": {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
-                    },
-                    "incompleteColumns": {}
-                }}}},
-                "filters": [],
-                "query": {"language": "kuery", "query": ""},
-                "visualization": {"shape": shape, "layers": [{"layerId": "l1", "layerType": "data", "primaryGroups": ["b"], "metrics": ["m"], "categoryDisplay": "default", "legendDisplay": "show", "nestedLegend": False, "numberDisplay": "percent"}]}
-            }),
-            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
-        }
-    }
-
-def make_lens_hbar(title, field):
-    """Create an inline Lens horizontal bar chart"""
-    return {
-        "attributes": {
-            "title": title,
-            "visualizationType": "lnsXY",
-            "state": json.dumps({
-                "datasourceStates": {"formBased": {"layers": {"l1": {
-                    "columnOrder": ["b", "m"],
-                    "columns": {
-                        "b": {"dataType": "string", "isBucketed": True, "label": field, "operationType": "terms", "params": {"orderBy": {"columnId": "m", "type": "column"}, "orderDirection": "desc", "size": 10}, "scale": "ordinal", "sourceField": field},
-                        "m": {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
-                    },
-                    "incompleteColumns": {}
-                }}}},
-                "filters": [],
-                "query": {"language": "kuery", "query": ""},
-                "visualization": {"preferredSeriesType": "bar_horizontal", "layers": [{"layerId": "l1", "layerType": "data", "seriesType": "bar_horizontal", "accessors": ["m"], "xAccessor": "b"}], "legend": {"isVisible": False}, "valueLabels": "show"}
-            }),
-            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
-        }
-    }
-
-def make_lens_table(title, fields):
-    """Create an inline Lens datatable"""
-    cols = {}
-    col_order = []
-    for i, f in enumerate(fields):
-        cid = f"c{i}"
-        col_order.append(cid)
-        cols[cid] = {"dataType": "string", "isBucketed": True, "label": f, "operationType": "terms", "params": {"orderBy": {"columnId": "cm", "type": "column"}, "orderDirection": "desc", "size": 20}, "scale": "ordinal", "sourceField": f}
-    col_order.append("cm")
-    cols["cm"] = {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
-    
-    vis_cols = [{"columnId": c, "isTransposed": False} for c in col_order]
-    
-    return {
-        "attributes": {
-            "title": title,
-            "visualizationType": "lnsDatatable",
-            "state": json.dumps({
-                "datasourceStates": {"formBased": {"layers": {"l1": {"columnOrder": col_order, "columns": cols, "incompleteColumns": {}}}}},
-                "filters": [],
-                "query": {"language": "kuery", "query": ""},
-                "visualization": {"layerId": "l1", "layerType": "data", "columns": vis_cols}
-            }),
-            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
-        }
-    }
-
-# Build panels (by-value, embedded in dashboard)
-panels = []
-
-def add_panel(x, y, w, h, panel_type, config):
-    idx = f"p{len(panels)}"
-    panel = {
-        "version": "8.12.0",
-        "type": panel_type,
-        "gridData": {"x": x, "y": y, "w": w, "h": h, "i": idx},
-        "panelIndex": idx,
-        "embeddableConfig": config
-    }
-    panels.append(panel)
-
-# Row 1: Metrics
-add_panel(0, 0, 12, 8, "lens", make_lens_metric("Critical Events", "___records___", "count", 'risk_level : "CRITICAL"', "#BD271E"))
-add_panel(12, 0, 12, 8, "lens", make_lens_metric("Endpoints Comprometidos", "endpoint", "unique_count", "", "#F5A700"))
-add_panel(24, 0, 12, 8, "lens", make_lens_metric("Tecnicas MITRE", "technique", "unique_count", "", "#6092C0"))
-add_panel(36, 0, 12, 8, "lens", make_lens_pie("Risk Distribution", "risk_level", "pie"))
-
-# Row 2: Timeline
-add_panel(0, 8, 48, 14, "lens", make_lens_bar_timeline("Attack Timeline"))
-
-# Row 3: Charts
-add_panel(0, 22, 16, 14, "lens", make_lens_pie("Events by Phase", "event_type", "donut"))
-add_panel(16, 22, 16, 14, "lens", make_lens_hbar("Events by Endpoint", "endpoint"))
-add_panel(32, 22, 16, 14, "lens", make_lens_hbar("Events by Technique", "technique"))
-
-# Row 4: Table
-add_panel(0, 36, 48, 14, "lens", make_lens_table("MITRE ATT&CK Details", ["technique", "tactic", "endpoint"]))
-
-# Create dashboard via API
-dashboard_body = {
-    "attributes": {
-        "title": "Threat Hunting - Attack Overview",
-        "description": "Dashboard de monitoreo en tiempo real del ataque APT. Auto-refresh 5s.",
-        "panelsJSON": json.dumps(panels),
-        "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": True, "hidePanelTitles": False}),
-        "timeRestore": True,
-        "timeFrom": "now-2h",
-        "timeTo": "now",
-        "refreshInterval": {"pause": False, "value": 5000},
-        "kibanaSavedObjectMeta": {
-            "searchSourceJSON": json.dumps({"query": {"query": "", "language": "kuery"}, "filter": []})
-        }
-    }
+    # Intentar crear, si existe actualizar
+    curl -s -X POST "${KIBANA_URL}/api/saved_objects/visualization/${id}?overwrite=true" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -d "$body" > /dev/null 2>&1
 }
 
-# Use the saved objects API to create/update the dashboard
-url = f"{KIBANA_URL}/api/saved_objects/dashboard/threat-hunting-overview"
-data = json.dumps(dashboard_body).encode()
+# VIS 1: Metric - Critical Events Count
+create_vis "vis-critical-count" '{
+  "attributes": {
+    "title": "Critical Events Count",
+    "visState": "{\"title\":\"Critical Events Count\",\"type\":\"metric\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"}],\"params\":{\"metric\":{\"percentageMode\":false,\"colorSchema\":\"Green to Red\",\"metricColorMode\":\"Labels\",\"colorsRange\":[{\"from\":0,\"to\":100}],\"labels\":{\"show\":true},\"style\":{\"bgColor\":false,\"labelColor\":true,\"fontSize\":60}},\"addTooltip\":true,\"addLegend\":false,\"type\":\"metric\"}}",
+    "uiStateJSON": "{}",
+    "description": "Total de eventos criticos",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"risk_level: \\\"CRITICAL\\\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Critical Events Count"
 
-req = urllib.request.Request(url, data=data, method="PUT")
-req.add_header("kbn-xsrf", "true")
-req.add_header("Content-Type", "application/json")
+# VIS 2: Metric - Endpoints Comprometidos
+create_vis "vis-endpoints-count" '{
+  "attributes": {
+    "title": "Endpoints Comprometidos",
+    "visState": "{\"title\":\"Endpoints Comprometidos\",\"type\":\"metric\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"cardinality\",\"params\":{\"field\":\"endpoint\"},\"schema\":\"metric\"}],\"params\":{\"metric\":{\"percentageMode\":false,\"colorSchema\":\"Green to Red\",\"metricColorMode\":\"Labels\",\"colorsRange\":[{\"from\":0,\"to\":10}],\"labels\":{\"show\":true},\"style\":{\"bgColor\":false,\"labelColor\":true,\"fontSize\":60}},\"addTooltip\":true,\"addLegend\":false,\"type\":\"metric\"}}",
+    "uiStateJSON": "{}",
+    "description": "Endpoints unicos comprometidos",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"risk_level: \\\"CRITICAL\\\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Endpoints Comprometidos"
 
-try:
-    # Try PUT (update)
-    resp = urllib.request.urlopen(req)
-    result = json.loads(resp.read())
-    print(f"[+] Dashboard actualizado: {result.get('id', 'ok')}")
-except urllib.error.HTTPError as e:
-    if e.code == 404:
-        # Try POST (create)
-        req2 = urllib.request.Request(f"{KIBANA_URL}/api/saved_objects/dashboard/threat-hunting-overview", data=data, method="POST")
-        req2.add_header("kbn-xsrf", "true")
-        req2.add_header("Content-Type", "application/json")
-        try:
-            resp2 = urllib.request.urlopen(req2)
-            result2 = json.loads(resp2.read())
-            print(f"[+] Dashboard creado: {result2.get('id', 'ok')}")
-        except urllib.error.HTTPError as e2:
-            body = e2.read().decode()
-            print(f"[!] Error creando dashboard: {e2.code}")
-            print(body[:500])
-    else:
-        body = e.read().decode()
-        print(f"[!] Error: {e.code}")
-        print(body[:500])
-except Exception as ex:
-    print(f"[!] Exception: {ex}")
+# VIS 3: Metric - Tecnicas MITRE
+create_vis "vis-mitre-count" '{
+  "attributes": {
+    "title": "Tecnicas MITRE ATT&CK",
+    "visState": "{\"title\":\"Tecnicas MITRE ATT&CK\",\"type\":\"metric\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"cardinality\",\"params\":{\"field\":\"technique\"},\"schema\":\"metric\"}],\"params\":{\"metric\":{\"percentageMode\":false,\"colorSchema\":\"Green to Red\",\"metricColorMode\":\"Labels\",\"colorsRange\":[{\"from\":0,\"to\":20}],\"labels\":{\"show\":true},\"style\":{\"bgColor\":false,\"labelColor\":true,\"fontSize\":60}},\"addTooltip\":true,\"addLegend\":false,\"type\":\"metric\"}}",
+    "uiStateJSON": "{}",
+    "description": "Tecnicas unicas detectadas",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Tecnicas MITRE"
 
-PYTHON_SCRIPT
+# VIS 4: Pie - Risk Level Distribution
+create_vis "vis-risk-pie" '{
+  "attributes": {
+    "title": "Risk Level Distribution",
+    "visState": "{\"title\":\"Risk Level Distribution\",\"type\":\"pie\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"risk_level\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":5},\"schema\":\"segment\"}],\"params\":{\"type\":\"pie\",\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"isDonut\":false,\"labels\":{\"show\":true,\"values\":true,\"last_level\":true,\"truncate\":100}}}",
+    "uiStateJSON": "{}",
+    "description": "Distribucion por nivel de riesgo",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Risk Level Pie"
+
+# VIS 5: Histogram - Attack Timeline
+create_vis "vis-attack-timeline" '{
+  "attributes": {
+    "title": "Attack Timeline",
+    "visState": "{\"title\":\"Attack Timeline\",\"type\":\"histogram\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"},{\"id\":\"2\",\"enabled\":true,\"type\":\"date_histogram\",\"params\":{\"field\":\"@timestamp\",\"useNormalizedEsInterval\":true,\"scaleMetricValues\":false,\"interval\":\"auto\",\"used_interval\":\"5m\",\"drop_partials\":false,\"min_doc_count\":0,\"extended_bounds\":{}},\"schema\":\"segment\"}],\"params\":{\"type\":\"histogram\",\"grid\":{\"categoryLines\":false},\"categoryAxes\":[{\"id\":\"CategoryAxis-1\",\"type\":\"category\",\"position\":\"bottom\",\"show\":true,\"labels\":{\"show\":true,\"truncate\":100}}],\"valueAxes\":[{\"id\":\"ValueAxis-1\",\"name\":\"LeftAxis-1\",\"type\":\"value\",\"position\":\"left\",\"show\":true,\"labels\":{\"show\":true}}],\"seriesParams\":[{\"show\":true,\"type\":\"histogram\",\"mode\":\"stacked\",\"data\":{\"label\":\"Count\",\"id\":\"1\"},\"valueAxis\":\"ValueAxis-1\"}],\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\"}}",
+    "uiStateJSON": "{}",
+    "description": "Eventos en el tiempo",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Attack Timeline"
+
+# VIS 6: Pie - Events by Type
+create_vis "vis-events-type" '{
+  "attributes": {
+    "title": "Events by Attack Phase",
+    "visState": "{\"title\":\"Events by Attack Phase\",\"type\":\"pie\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"event_type\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":10},\"schema\":\"segment\"}],\"params\":{\"type\":\"pie\",\"addTooltip\":true,\"addLegend\":true,\"legendPosition\":\"right\",\"isDonut\":true,\"labels\":{\"show\":true,\"values\":true,\"last_level\":true,\"truncate\":100}}}",
+    "uiStateJSON": "{}",
+    "description": "Distribucion por fase del ataque",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Events by Phase"
+
+# VIS 7: Horizontal Bar - Events by Endpoint
+create_vis "vis-events-endpoint" '{
+  "attributes": {
+    "title": "Events by Endpoint",
+    "visState": "{\"title\":\"Events by Endpoint\",\"type\":\"horizontal_bar\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"endpoint\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":10},\"schema\":\"segment\"}],\"params\":{\"type\":\"horizontal_bar\",\"grid\":{\"categoryLines\":false},\"categoryAxes\":[{\"id\":\"CategoryAxis-1\",\"type\":\"category\",\"position\":\"left\",\"show\":true,\"labels\":{\"show\":true,\"truncate\":100}}],\"valueAxes\":[{\"id\":\"ValueAxis-1\",\"name\":\"BottomAxis-1\",\"type\":\"value\",\"position\":\"bottom\",\"show\":true,\"labels\":{\"show\":true}}],\"seriesParams\":[{\"show\":true,\"type\":\"histogram\",\"mode\":\"normal\",\"data\":{\"label\":\"Count\",\"id\":\"1\"},\"valueAxis\":\"ValueAxis-1\"}],\"addTooltip\":true,\"addLegend\":false}}",
+    "uiStateJSON": "{}",
+    "description": "Actividad por endpoint",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] Events by Endpoint"
+
+# VIS 8: Table - MITRE Techniques
+create_vis "vis-mitre-table" '{
+  "attributes": {
+    "title": "MITRE ATT&CK Techniques",
+    "visState": "{\"title\":\"MITRE ATT&CK Techniques\",\"type\":\"table\",\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"params\":{},\"schema\":\"metric\"},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"technique\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":20},\"schema\":\"bucket\"},{\"id\":\"3\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"tactic\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":20},\"schema\":\"bucket\"},{\"id\":\"4\",\"enabled\":true,\"type\":\"terms\",\"params\":{\"field\":\"endpoint\",\"orderBy\":\"1\",\"order\":\"desc\",\"size\":20},\"schema\":\"bucket\"}],\"params\":{\"perPage\":10,\"showPartialRows\":false,\"showMetricsAtAllLevels\":false,\"showTotal\":false,\"totalFunc\":\"sum\",\"percentageCol\":\"\"}}",
+    "uiStateJSON": "{\"vis\":{\"params\":{\"sort\":{\"columnIndex\":null,\"direction\":null}}}}",
+    "description": "Tabla de tecnicas MITRE detectadas",
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\"}"
+    }
+  },
+  "references": [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "'"${DV_ID}"'"}]
+}'
+echo "  [+] MITRE Table"
+
+# ============================================================================
+# Crear el Dashboard referenciando las visualizaciones
+# ============================================================================
+echo "[*] Creando dashboard..."
+
+PANELS='[{"version":"8.12.0","type":"visualization","gridData":{"x":0,"y":0,"w":12,"h":8,"i":"p0"},"panelIndex":"p0","embeddableConfig":{},"panelRefName":"panel_0"},{"version":"8.12.0","type":"visualization","gridData":{"x":12,"y":0,"w":12,"h":8,"i":"p1"},"panelIndex":"p1","embeddableConfig":{},"panelRefName":"panel_1"},{"version":"8.12.0","type":"visualization","gridData":{"x":24,"y":0,"w":12,"h":8,"i":"p2"},"panelIndex":"p2","embeddableConfig":{},"panelRefName":"panel_2"},{"version":"8.12.0","type":"visualization","gridData":{"x":36,"y":0,"w":12,"h":8,"i":"p3"},"panelIndex":"p3","embeddableConfig":{},"panelRefName":"panel_3"},{"version":"8.12.0","type":"visualization","gridData":{"x":0,"y":8,"w":48,"h":12,"i":"p4"},"panelIndex":"p4","embeddableConfig":{},"panelRefName":"panel_4"},{"version":"8.12.0","type":"visualization","gridData":{"x":0,"y":20,"w":16,"h":14,"i":"p5"},"panelIndex":"p5","embeddableConfig":{},"panelRefName":"panel_5"},{"version":"8.12.0","type":"visualization","gridData":{"x":16,"y":20,"w":16,"h":14,"i":"p6"},"panelIndex":"p6","embeddableConfig":{},"panelRefName":"panel_6"},{"version":"8.12.0","type":"visualization","gridData":{"x":32,"y":20,"w":16,"h":14,"i":"p7"},"panelIndex":"p7","embeddableConfig":{},"panelRefName":"panel_7"}]'
+
+curl -s -X POST "${KIBANA_URL}/api/saved_objects/dashboard/threat-hunting-overview?overwrite=true" \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" \
+    -d '{
+  "attributes": {
+    "title": "Threat Hunting - Attack Overview",
+    "description": "Dashboard de monitoreo en tiempo real del ataque APT simulado",
+    "panelsJSON": "'"$(echo $PANELS | sed 's/"/\\"/g')"'",
+    "optionsJSON": "{\"useMargins\":true,\"syncColors\":true,\"hidePanelTitles\":false}",
+    "timeRestore": true,
+    "timeFrom": "now-2h",
+    "timeTo": "now",
+    "refreshInterval": {"pause": false, "value": 5000},
+    "kibanaSavedObjectMeta": {
+      "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[]}"
+    }
+  },
+  "references": [
+    {"name": "panel_0", "type": "visualization", "id": "vis-critical-count"},
+    {"name": "panel_1", "type": "visualization", "id": "vis-endpoints-count"},
+    {"name": "panel_2", "type": "visualization", "id": "vis-mitre-count"},
+    {"name": "panel_3", "type": "visualization", "id": "vis-risk-pie"},
+    {"name": "panel_4", "type": "visualization", "id": "vis-attack-timeline"},
+    {"name": "panel_5", "type": "visualization", "id": "vis-events-type"},
+    {"name": "panel_6", "type": "visualization", "id": "vis-events-endpoint"},
+    {"name": "panel_7", "type": "visualization", "id": "vis-mitre-table"}
+  ]
+}' > /dev/null 2>&1
+
+echo "  [+] Dashboard creado"
 
 echo ""
 echo "=============================================="
 echo "  DASHBOARD LISTO"
 echo "  Ir a: ${KIBANA_URL}/app/dashboards"
 echo "  Abrir: 'Threat Hunting - Attack Overview'"
+echo ""
+echo "  Paneles:"
+echo "    [1] Critical Events (metrica)"
+echo "    [2] Endpoints Comprometidos (metrica)"
+echo "    [3] Tecnicas MITRE (metrica)"
+echo "    [4] Risk Distribution (pie)"
+echo "    [5] Attack Timeline (histograma)"
+echo "    [6] Events by Phase (donut)"
+echo "    [7] Events by Endpoint (bar horizontal)"
+echo "    [8] MITRE Techniques (tabla)"
 echo "=============================================="
