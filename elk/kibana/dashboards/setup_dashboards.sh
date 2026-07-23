@@ -313,3 +313,11 @@ echo "  ALERTAS:"
 echo "     Menu > Stack Management > Rules and Connectors"
 echo ""
 echo "=============================================="
+
+# ============================================================================
+# 6. IMPORTAR DASHBOARD CON VISUALIZACIONES REALES
+# ============================================================================
+echo ""
+echo "[6/6] Importando dashboard con visualizaciones..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${SCRIPT_DIR}/import_dashboards.sh" "${KIBANA_URL}"
