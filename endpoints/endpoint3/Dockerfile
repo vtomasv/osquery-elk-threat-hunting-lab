@@ -72,7 +72,7 @@ RUN mkdir -p /root/.vnc && \
     echo '#!/bin/bash\nstartxfce4 &' > /root/.vnc/xstartup && \
     chmod +x /root/.vnc/xstartup
 
-RUN mkdir -p /srv/shares/{finanzas,rrhh,desarrollo,gerencia,backup} && \
+RUN mkdir -p /srv/shares/finanzas /srv/shares/rrhh /srv/shares/desarrollo /srv/shares/gerencia /srv/shares/backup && \
     echo "Balance General 2024 - CONFIDENCIAL" > /srv/shares/finanzas/balance_2024.xlsx && \
     echo "Contratos empleados" > /srv/shares/rrhh/contratos.pdf && \
     echo "Código fuente proyecto secreto" > /srv/shares/desarrollo/proyecto_x.tar.gz && \

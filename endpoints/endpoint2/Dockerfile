@@ -72,7 +72,7 @@ RUN mkdir -p /root/.vnc && \
     echo '#!/bin/bash\nstartxfce4 &' > /root/.vnc/xstartup && \
     chmod +x /root/.vnc/xstartup
 
-RUN mkdir -p /home/carlos.mendez/{Documents,Downloads,Desktop,.ssh} && \
+RUN mkdir -p /home/carlos.mendez/Documents /home/carlos.mendez/Downloads /home/carlos.mendez/Desktop /home/carlos.mendez/.ssh && \
     echo "Nóminas empleados 2024" > /home/carlos.mendez/Documents/nominas_2024.xlsx && \
     echo "Datos personales empleados" > /home/carlos.mendez/Documents/datos_personales.csv
 

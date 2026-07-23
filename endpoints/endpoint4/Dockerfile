@@ -71,7 +71,7 @@ RUN mkdir -p /root/.vnc && \
     echo '#!/bin/bash\nstartxfce4 &' > /root/.vnc/xstartup && \
     chmod +x /root/.vnc/xstartup
 
-RUN mkdir -p /home/pedro.silva/{Documents,Downloads,Desktop,.ssh,projects} && \
+RUN mkdir -p /home/pedro.silva/Documents /home/pedro.silva/Downloads /home/pedro.silva/Desktop /home/pedro.silva/.ssh /home/pedro.silva/projects && \
     echo "API Keys producción" > /home/pedro.silva/projects/.env && \
     echo "AWS_SECRET=AKIAIOSFODNN7EXAMPLE" >> /home/pedro.silva/projects/.env && \
     echo "DB_PASSWORD=SuperSecret123!" >> /home/pedro.silva/projects/.env

@@ -85,7 +85,7 @@ RUN mkdir -p /root/.vnc && \
     chmod +x /root/.vnc/xstartup
 
 # Crear archivos "señuelo" para simular workstation real
-RUN mkdir -p /home/maria.gonzalez/{Documents,Downloads,Desktop,.ssh} && \
+RUN mkdir -p /home/maria.gonzalez/Documents /home/maria.gonzalez/Downloads /home/maria.gonzalez/Desktop /home/maria.gonzalez/.ssh && \
     echo "Presupuesto Q4 2024 - CONFIDENCIAL" > /home/maria.gonzalez/Documents/presupuesto_q4.xlsx && \
     echo "Lista de proveedores - NO COMPARTIR" > /home/maria.gonzalez/Documents/proveedores.csv && \
     echo "Claves bancarias - PRIVADO" > /home/maria.gonzalez/Documents/claves_banco.txt
