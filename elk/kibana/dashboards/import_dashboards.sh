@@ -1,7 +1,7 @@
 #!/bin/bash
 ###############################################################################
-# IMPORT DASHBOARDS - Crea dashboards con visualizaciones REALES en Kibana 8.12
-# Usa la API de Saved Objects con formato NDJSON correcto para Lens
+# IMPORT DASHBOARDS - Crea dashboard con visualizaciones embebidas (by-value)
+# Usa paneles inline en el dashboard para evitar problemas de migración Lens
 #
 # Uso: ./import_dashboards.sh [kibana_url]
 ###############################################################################
@@ -9,7 +9,7 @@
 KIBANA_URL="${1:-http://localhost:5601}"
 
 echo "=============================================="
-echo "  IMPORTANDO DASHBOARDS CON VISUALIZACIONES"
+echo "  IMPORTANDO DASHBOARD"
 echo "  Kibana: ${KIBANA_URL}"
 echo "=============================================="
 
@@ -22,637 +22,250 @@ for i in $(seq 1 30); do
 done
 
 # ============================================================================
-# Generar el NDJSON con Python para control preciso del JSON
+# Crear dashboard con paneles embebidos (by-value) usando la API directa
+# Esto evita los problemas de migración de Lens saved objects
 # ============================================================================
-echo "[*] Generando visualizaciones..."
+echo "[*] Creando dashboard con visualizaciones embebidas..."
 
-python3 << 'PYTHON_SCRIPT'
+# Primero obtener el ID del data view threat-hunting-*
+DV_ID=$(curl -s "${KIBANA_URL}/api/data_views" -H "kbn-xsrf: true" 2>/dev/null | \
+    python3 -c "
+import json,sys
+try:
+    data = json.load(sys.stdin)
+    for dv in data.get('data_view', []):
+        if 'threat-hunting' in dv.get('title','') or 'threat-hunting' in dv.get('name',''):
+            print(dv['id']); break
+    else:
+        print('')
+except: print('')
+" 2>/dev/null)
+
+if [ -z "$DV_ID" ]; then
+    echo "  [!] No se encontro data view threat-hunting-*, creando uno..."
+    DV_ID=$(curl -s -X POST "${KIBANA_URL}/api/data_views/data_view" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -d '{"data_view":{"title":"threat-hunting-*","name":"Threat Hunting Events","timeFieldName":"@timestamp"}}' 2>/dev/null | \
+        python3 -c "import json,sys; print(json.load(sys.stdin).get('data_view',{}).get('id',''))" 2>/dev/null)
+fi
+echo "  Data View ID: ${DV_ID}"
+
+# Generar el dashboard con Python
+python3 - "$KIBANA_URL" "$DV_ID" << 'PYTHON_SCRIPT'
 import json
 import sys
+import urllib.request
 
-objects = []
+KIBANA_URL = sys.argv[1]
+DV_ID = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "threat-hunting"
 
-# === INDEX PATTERN ===
-objects.append({
-    "type": "index-pattern",
-    "id": "idx-threat-hunting",
-    "attributes": {
-        "title": "threat-hunting-*",
-        "timeFieldName": "@timestamp",
-        "name": "Threat Hunting Events"
-    },
-    "references": [],
-    "managed": False
-})
-
-# === METRIC 1: Critical Events Count ===
-objects.append({
-    "type": "lens",
-    "id": "vis-critical-count",
-    "attributes": {
-        "title": "Critical Events Count",
-        "description": "Total de eventos criticos",
-        "visualizationType": "lnsLegacyMetric",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col1"],
-                            "columns": {
-                                "col1": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Critical Events",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___",
-                                    "filter": {
-                                        "language": "kuery",
-                                        "query": "risk_level : \"CRITICAL\""
-                                    }
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "layerId": "layer1",
-                "layerType": "data",
-                "accessor": "col1",
-                "colorMode": "Labels",
-                "palette": {
-                    "name": "custom",
-                    "type": "palette",
-                    "params": {
-                        "steps": 3,
-                        "stops": [{"color": "#BD271E", "stop": 100}],
-                        "continuity": "above",
-                        "rangeType": "number"
-                    }
-                }
-            }
+def make_lens_metric(title, field, op, filter_query="", color="#6092C0"):
+    """Create an inline Lens metric panel config"""
+    col = {
+        "dataType": "number",
+        "isBucketed": False,
+        "label": title,
+        "operationType": op,
+        "scale": "ratio",
+        "sourceField": field
+    }
+    if filter_query:
+        col["filter"] = {"language": "kuery", "query": filter_query}
+    
+    return {
+        "attributes": {
+            "title": title,
+            "visualizationType": "lnsLegacyMetric",
+            "state": json.dumps({
+                "datasourceStates": {"formBased": {"layers": {"l1": {"columnOrder": ["c1"], "columns": {"c1": col}, "incompleteColumns": {}}}}},
+                "filters": [],
+                "query": {"language": "kuery", "query": ""},
+                "visualization": {"layerId": "l1", "layerType": "data", "accessor": "c1"}
+            }),
+            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
         }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+    }
 
-# === METRIC 2: Endpoints Comprometidos ===
-objects.append({
-    "type": "lens",
-    "id": "vis-endpoints-compromised",
-    "attributes": {
-        "title": "Endpoints Comprometidos",
-        "description": "Endpoints unicos comprometidos",
-        "visualizationType": "lnsLegacyMetric",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col1"],
-                            "columns": {
-                                "col1": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Endpoints",
-                                    "operationType": "unique_count",
-                                    "scale": "ratio",
-                                    "sourceField": "endpoint"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": "risk_level : \"CRITICAL\""},
-            "visualization": {
-                "layerId": "layer1",
-                "layerType": "data",
-                "accessor": "col1",
-                "colorMode": "Labels",
-                "palette": {
-                    "name": "custom",
-                    "type": "palette",
-                    "params": {
-                        "steps": 3,
-                        "stops": [{"color": "#F5A700", "stop": 100}],
-                        "continuity": "above",
-                        "rangeType": "number"
-                    }
-                }
-            }
+def make_lens_bar_timeline(title):
+    """Create an inline Lens XY bar chart over time"""
+    return {
+        "attributes": {
+            "title": title,
+            "visualizationType": "lnsXY",
+            "state": json.dumps({
+                "datasourceStates": {"formBased": {"layers": {"l1": {
+                    "columnOrder": ["x", "y"],
+                    "columns": {
+                        "x": {"dataType": "date", "isBucketed": True, "label": "@timestamp", "operationType": "date_histogram", "params": {"interval": "auto", "includeEmptyRows": True}, "scale": "interval", "sourceField": "@timestamp"},
+                        "y": {"dataType": "number", "isBucketed": False, "label": "Events", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
+                    },
+                    "incompleteColumns": {}
+                }}}},
+                "filters": [],
+                "query": {"language": "kuery", "query": ""},
+                "visualization": {"preferredSeriesType": "bar_stacked", "layers": [{"layerId": "l1", "layerType": "data", "seriesType": "bar_stacked", "accessors": ["y"], "xAccessor": "x"}], "legend": {"isVisible": True, "position": "right"}, "valueLabels": "hide"}
+            }),
+            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
         }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+    }
 
-# === METRIC 3: MITRE Techniques ===
-objects.append({
-    "type": "lens",
-    "id": "vis-mitre-count",
-    "attributes": {
-        "title": "Tecnicas MITRE ATT&CK",
-        "description": "Tecnicas unicas detectadas",
-        "visualizationType": "lnsLegacyMetric",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col1"],
-                            "columns": {
-                                "col1": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Tecnicas",
-                                    "operationType": "unique_count",
-                                    "scale": "ratio",
-                                    "sourceField": "technique"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "layerId": "layer1",
-                "layerType": "data",
-                "accessor": "col1",
-                "colorMode": "Labels",
-                "palette": {
-                    "name": "custom",
-                    "type": "palette",
-                    "params": {
-                        "steps": 3,
-                        "stops": [{"color": "#6092C0", "stop": 100}],
-                        "continuity": "above",
-                        "rangeType": "number"
-                    }
-                }
-            }
+def make_lens_pie(title, field, shape="donut"):
+    """Create an inline Lens pie/donut chart"""
+    return {
+        "attributes": {
+            "title": title,
+            "visualizationType": "lnsPie",
+            "state": json.dumps({
+                "datasourceStates": {"formBased": {"layers": {"l1": {
+                    "columnOrder": ["b", "m"],
+                    "columns": {
+                        "b": {"dataType": "string", "isBucketed": True, "label": field, "operationType": "terms", "params": {"orderBy": {"columnId": "m", "type": "column"}, "orderDirection": "desc", "size": 10}, "scale": "ordinal", "sourceField": field},
+                        "m": {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
+                    },
+                    "incompleteColumns": {}
+                }}}},
+                "filters": [],
+                "query": {"language": "kuery", "query": ""},
+                "visualization": {"shape": shape, "layers": [{"layerId": "l1", "layerType": "data", "primaryGroups": ["b"], "metrics": ["m"], "categoryDisplay": "default", "legendDisplay": "show", "nestedLegend": False, "numberDisplay": "percent"}]}
+            }),
+            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
         }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+    }
 
-# === METRIC 4: Total Events ===
-objects.append({
-    "type": "lens",
-    "id": "vis-total-events",
-    "attributes": {
-        "title": "Total Events",
-        "description": "Total de eventos de ataque",
-        "visualizationType": "lnsLegacyMetric",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col1"],
-                            "columns": {
-                                "col1": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Total Events",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "layerId": "layer1",
-                "layerType": "data",
-                "accessor": "col1"
-            }
+def make_lens_hbar(title, field):
+    """Create an inline Lens horizontal bar chart"""
+    return {
+        "attributes": {
+            "title": title,
+            "visualizationType": "lnsXY",
+            "state": json.dumps({
+                "datasourceStates": {"formBased": {"layers": {"l1": {
+                    "columnOrder": ["b", "m"],
+                    "columns": {
+                        "b": {"dataType": "string", "isBucketed": True, "label": field, "operationType": "terms", "params": {"orderBy": {"columnId": "m", "type": "column"}, "orderDirection": "desc", "size": 10}, "scale": "ordinal", "sourceField": field},
+                        "m": {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
+                    },
+                    "incompleteColumns": {}
+                }}}},
+                "filters": [],
+                "query": {"language": "kuery", "query": ""},
+                "visualization": {"preferredSeriesType": "bar_horizontal", "layers": [{"layerId": "l1", "layerType": "data", "seriesType": "bar_horizontal", "accessors": ["m"], "xAccessor": "b"}], "legend": {"isVisible": False}, "valueLabels": "show"}
+            }),
+            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
         }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+    }
 
-# === VIS 5: Attack Timeline (XY Bar) ===
-objects.append({
-    "type": "lens",
-    "id": "vis-attack-timeline",
-    "attributes": {
-        "title": "Attack Timeline",
-        "description": "Eventos en el tiempo",
-        "visualizationType": "lnsXY",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col-date", "col-count"],
-                            "columns": {
-                                "col-date": {
-                                    "dataType": "date",
-                                    "isBucketed": True,
-                                    "label": "@timestamp",
-                                    "operationType": "date_histogram",
-                                    "params": {"interval": "auto", "includeEmptyRows": True},
-                                    "scale": "interval",
-                                    "sourceField": "@timestamp"
-                                },
-                                "col-count": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Events",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "preferredSeriesType": "bar_stacked",
-                "layers": [{
-                    "layerId": "layer1",
-                    "layerType": "data",
-                    "seriesType": "bar_stacked",
-                    "accessors": ["col-count"],
-                    "xAccessor": "col-date",
-                    "yConfig": [{"forAccessor": "col-count", "color": "#BD271E"}]
-                }],
-                "legend": {"isVisible": True, "position": "right"},
-                "valueLabels": "hide"
-            }
+def make_lens_table(title, fields):
+    """Create an inline Lens datatable"""
+    cols = {}
+    col_order = []
+    for i, f in enumerate(fields):
+        cid = f"c{i}"
+        col_order.append(cid)
+        cols[cid] = {"dataType": "string", "isBucketed": True, "label": f, "operationType": "terms", "params": {"orderBy": {"columnId": "cm", "type": "column"}, "orderDirection": "desc", "size": 20}, "scale": "ordinal", "sourceField": f}
+    col_order.append("cm")
+    cols["cm"] = {"dataType": "number", "isBucketed": False, "label": "Count", "operationType": "count", "scale": "ratio", "sourceField": "___records___"}
+    
+    vis_cols = [{"columnId": c, "isTransposed": False} for c in col_order]
+    
+    return {
+        "attributes": {
+            "title": title,
+            "visualizationType": "lnsDatatable",
+            "state": json.dumps({
+                "datasourceStates": {"formBased": {"layers": {"l1": {"columnOrder": col_order, "columns": cols, "incompleteColumns": {}}}}},
+                "filters": [],
+                "query": {"language": "kuery", "query": ""},
+                "visualization": {"layerId": "l1", "layerType": "data", "columns": vis_cols}
+            }),
+            "references": [{"id": DV_ID, "name": "indexpattern-datasource-layer-l1", "type": "index-pattern"}]
         }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+    }
 
-# === VIS 6: Events by Type (Pie/Donut) ===
-objects.append({
-    "type": "lens",
-    "id": "vis-events-by-type",
-    "attributes": {
-        "title": "Events by Attack Phase",
-        "description": "Distribucion por tipo de evento",
-        "visualizationType": "lnsPie",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col-type", "col-count"],
-                            "columns": {
-                                "col-type": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Event Type",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 10},
-                                    "scale": "ordinal",
-                                    "sourceField": "event_type"
-                                },
-                                "col-count": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Count",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "shape": "donut",
-                "layers": [{
-                    "layerId": "layer1",
-                    "layerType": "data",
-                    "primaryGroups": ["col-type"],
-                    "metrics": ["col-count"],
-                    "categoryDisplay": "default",
-                    "legendDisplay": "show",
-                    "nestedLegend": False,
-                    "numberDisplay": "percent"
-                }]
-            }
-        }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+# Build panels (by-value, embedded in dashboard)
+panels = []
 
-# === VIS 7: Events by Endpoint (Horizontal Bar) ===
-objects.append({
-    "type": "lens",
-    "id": "vis-events-by-endpoint",
-    "attributes": {
-        "title": "Events by Endpoint",
-        "description": "Actividad por endpoint",
-        "visualizationType": "lnsXY",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col-ep", "col-count"],
-                            "columns": {
-                                "col-ep": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Endpoint",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 10},
-                                    "scale": "ordinal",
-                                    "sourceField": "endpoint"
-                                },
-                                "col-count": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Events",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "preferredSeriesType": "bar_horizontal",
-                "layers": [{
-                    "layerId": "layer1",
-                    "layerType": "data",
-                    "seriesType": "bar_horizontal",
-                    "accessors": ["col-count"],
-                    "xAccessor": "col-ep"
-                }],
-                "legend": {"isVisible": False, "position": "right"},
-                "valueLabels": "show"
-            }
-        }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+def add_panel(x, y, w, h, panel_type, config):
+    idx = f"p{len(panels)}"
+    panel = {
+        "version": "8.12.0",
+        "type": panel_type,
+        "gridData": {"x": x, "y": y, "w": w, "h": h, "i": idx},
+        "panelIndex": idx,
+        "embeddableConfig": config
+    }
+    panels.append(panel)
 
-# === VIS 8: Risk Level (Pie) ===
-objects.append({
-    "type": "lens",
-    "id": "vis-risk-distribution",
-    "attributes": {
-        "title": "Risk Level Distribution",
-        "description": "Distribucion por nivel de riesgo",
-        "visualizationType": "lnsPie",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col-risk", "col-count"],
-                            "columns": {
-                                "col-risk": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Risk Level",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 5},
-                                    "scale": "ordinal",
-                                    "sourceField": "risk_level"
-                                },
-                                "col-count": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Count",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "shape": "pie",
-                "layers": [{
-                    "layerId": "layer1",
-                    "layerType": "data",
-                    "primaryGroups": ["col-risk"],
-                    "metrics": ["col-count"],
-                    "categoryDisplay": "default",
-                    "legendDisplay": "show",
-                    "nestedLegend": False,
-                    "numberDisplay": "value"
-                }]
-            }
-        }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+# Row 1: Metrics
+add_panel(0, 0, 12, 8, "lens", make_lens_metric("Critical Events", "___records___", "count", 'risk_level : "CRITICAL"', "#BD271E"))
+add_panel(12, 0, 12, 8, "lens", make_lens_metric("Endpoints Comprometidos", "endpoint", "unique_count", "", "#F5A700"))
+add_panel(24, 0, 12, 8, "lens", make_lens_metric("Tecnicas MITRE", "technique", "unique_count", "", "#6092C0"))
+add_panel(36, 0, 12, 8, "lens", make_lens_pie("Risk Distribution", "risk_level", "pie"))
 
-# === VIS 9: MITRE Table ===
-objects.append({
-    "type": "lens",
-    "id": "vis-mitre-table",
-    "attributes": {
-        "title": "MITRE ATT&CK Techniques Detected",
-        "description": "Tabla de tecnicas",
-        "visualizationType": "lnsDatatable",
-        "state": {
-            "datasourceStates": {
-                "formBased": {
-                    "layers": {
-                        "layer1": {
-                            "columnOrder": ["col-tech", "col-tactic", "col-ep", "col-count"],
-                            "columns": {
-                                "col-tech": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Technique ID",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 20},
-                                    "scale": "ordinal",
-                                    "sourceField": "technique"
-                                },
-                                "col-tactic": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Tactic",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 20},
-                                    "scale": "ordinal",
-                                    "sourceField": "tactic"
-                                },
-                                "col-ep": {
-                                    "dataType": "string",
-                                    "isBucketed": True,
-                                    "label": "Endpoint",
-                                    "operationType": "terms",
-                                    "params": {"orderBy": {"columnId": "col-count", "type": "column"}, "orderDirection": "desc", "size": 20},
-                                    "scale": "ordinal",
-                                    "sourceField": "endpoint"
-                                },
-                                "col-count": {
-                                    "dataType": "number",
-                                    "isBucketed": False,
-                                    "label": "Count",
-                                    "operationType": "count",
-                                    "scale": "ratio",
-                                    "sourceField": "___records___"
-                                }
-                            },
-                            "incompleteColumns": {}
-                        }
-                    }
-                }
-            },
-            "filters": [],
-            "query": {"language": "kuery", "query": ""},
-            "visualization": {
-                "layerId": "layer1",
-                "layerType": "data",
-                "columns": [
-                    {"columnId": "col-tech", "isTransposed": False},
-                    {"columnId": "col-tactic", "isTransposed": False},
-                    {"columnId": "col-ep", "isTransposed": False},
-                    {"columnId": "col-count", "isTransposed": False}
-                ]
-            }
-        }
-    },
-    "references": [
-        {"id": "idx-threat-hunting", "name": "indexpattern-datasource-layer-layer1", "type": "index-pattern"}
-    ],
-    "managed": False
-})
+# Row 2: Timeline
+add_panel(0, 8, 48, 14, "lens", make_lens_bar_timeline("Attack Timeline"))
 
-# === DASHBOARD ===
-panels = [
-    {"version":"8.12.0","type":"lens","gridData":{"x":0,"y":0,"w":12,"h":8,"i":"p1"},"panelIndex":"p1","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p1"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":12,"y":0,"w":12,"h":8,"i":"p2"},"panelIndex":"p2","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p2"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":24,"y":0,"w":12,"h":8,"i":"p3"},"panelIndex":"p3","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p3"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":36,"y":0,"w":12,"h":8,"i":"p4"},"panelIndex":"p4","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p4"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":0,"y":8,"w":48,"h":14,"i":"p5"},"panelIndex":"p5","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p5"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":0,"y":22,"w":16,"h":14,"i":"p6"},"panelIndex":"p6","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p6"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":16,"y":22,"w":16,"h":14,"i":"p7"},"panelIndex":"p7","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p7"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":32,"y":22,"w":16,"h":14,"i":"p8"},"panelIndex":"p8","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p8"},
-    {"version":"8.12.0","type":"lens","gridData":{"x":0,"y":36,"w":48,"h":14,"i":"p9"},"panelIndex":"p9","embeddableConfig":{"enhancements":{}},"panelRefName":"panel_p9"},
-]
+# Row 3: Charts
+add_panel(0, 22, 16, 14, "lens", make_lens_pie("Events by Phase", "event_type", "donut"))
+add_panel(16, 22, 16, 14, "lens", make_lens_hbar("Events by Endpoint", "endpoint"))
+add_panel(32, 22, 16, 14, "lens", make_lens_hbar("Events by Technique", "technique"))
 
-objects.append({
-    "type": "dashboard",
-    "id": "threat-hunting-overview",
+# Row 4: Table
+add_panel(0, 36, 48, 14, "lens", make_lens_table("MITRE ATT&CK Details", ["technique", "tactic", "endpoint"]))
+
+# Create dashboard via API
+dashboard_body = {
     "attributes": {
         "title": "Threat Hunting - Attack Overview",
-        "description": "Dashboard principal: Monitoreo en tiempo real del ataque APT. Auto-refresh 5s.",
-        "hits": 0,
+        "description": "Dashboard de monitoreo en tiempo real del ataque APT. Auto-refresh 5s.",
+        "panelsJSON": json.dumps(panels),
+        "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": True, "hidePanelTitles": False}),
+        "timeRestore": True,
+        "timeFrom": "now-2h",
+        "timeTo": "now",
+        "refreshInterval": {"pause": False, "value": 5000},
         "kibanaSavedObjectMeta": {
             "searchSourceJSON": json.dumps({"query": {"query": "", "language": "kuery"}, "filter": []})
-        },
-        "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": True, "hidePanelTitles": False}),
-        "panelsJSON": json.dumps(panels),
-        "refreshInterval": {"pause": False, "value": 5000},
-        "timeFrom": "now-2h",
-        "timeRestore": True,
-        "timeTo": "now",
-        "version": 1
-    },
-    "references": [
-        {"id": "vis-critical-count", "name": "panel_p1", "type": "lens"},
-        {"id": "vis-endpoints-compromised", "name": "panel_p2", "type": "lens"},
-        {"id": "vis-mitre-count", "name": "panel_p3", "type": "lens"},
-        {"id": "vis-total-events", "name": "panel_p4", "type": "lens"},
-        {"id": "vis-attack-timeline", "name": "panel_p5", "type": "lens"},
-        {"id": "vis-events-by-type", "name": "panel_p6", "type": "lens"},
-        {"id": "vis-events-by-endpoint", "name": "panel_p7", "type": "lens"},
-        {"id": "vis-risk-distribution", "name": "panel_p8", "type": "lens"},
-        {"id": "vis-mitre-table", "name": "panel_p9", "type": "lens"},
-    ],
-    "managed": False
-})
+        }
+    }
+}
 
-# Kibana 8.12 requires 'state' in Lens objects to be a JSON STRING, not an object
-for obj in objects:
-    if obj.get("type") == "lens" and "state" in obj.get("attributes", {}):
-        obj["attributes"]["state"] = json.dumps(obj["attributes"]["state"])
+# Use the saved objects API to create/update the dashboard
+url = f"{KIBANA_URL}/api/saved_objects/dashboard/threat-hunting-overview"
+data = json.dumps(dashboard_body).encode()
 
-# Write NDJSON
-with open("/tmp/full_dashboard.ndjson", "w") as f:
-    for obj in objects:
-        f.write(json.dumps(obj) + "\n")
+req = urllib.request.Request(url, data=data, method="PUT")
+req.add_header("kbn-xsrf", "true")
+req.add_header("Content-Type", "application/json")
 
-print(f"[+] Generated {len(objects)} objects in NDJSON")
+try:
+    # Try PUT (update)
+    resp = urllib.request.urlopen(req)
+    result = json.loads(resp.read())
+    print(f"[+] Dashboard actualizado: {result.get('id', 'ok')}")
+except urllib.error.HTTPError as e:
+    if e.code == 404:
+        # Try POST (create)
+        req2 = urllib.request.Request(f"{KIBANA_URL}/api/saved_objects/dashboard/threat-hunting-overview", data=data, method="POST")
+        req2.add_header("kbn-xsrf", "true")
+        req2.add_header("Content-Type", "application/json")
+        try:
+            resp2 = urllib.request.urlopen(req2)
+            result2 = json.loads(resp2.read())
+            print(f"[+] Dashboard creado: {result2.get('id', 'ok')}")
+        except urllib.error.HTTPError as e2:
+            body = e2.read().decode()
+            print(f"[!] Error creando dashboard: {e2.code}")
+            print(body[:500])
+    else:
+        body = e.read().decode()
+        print(f"[!] Error: {e.code}")
+        print(body[:500])
+except Exception as ex:
+    print(f"[!] Exception: {ex}")
+
 PYTHON_SCRIPT
-
-# Importar
-echo "[*] Importando en Kibana..."
-RESULT=$(curl -s -w "\n%{http_code}" -X POST "${KIBANA_URL}/api/saved_objects/_import?overwrite=true" \
-    -H "kbn-xsrf: true" \
-    --form file=@/tmp/full_dashboard.ndjson 2>&1)
-
-HTTP_CODE=$(echo "$RESULT" | tail -1)
-BODY=$(echo "$RESULT" | sed '$d')
-
-if echo "$BODY" | grep -q '"success":true'; then
-    echo "[+] Dashboard importado exitosamente"
-    echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'    Objetos importados: {d.get(\"successCount\", 0)}')" 2>/dev/null
-else
-    echo "[!] HTTP ${HTTP_CODE} - Detalles:"
-    echo "$BODY" | python3 -m json.tool 2>/dev/null | head -30 || echo "$BODY" | head -20
-fi
-
-rm -f /tmp/full_dashboard.ndjson
 
 echo ""
 echo "=============================================="
